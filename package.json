@@ -1,6 +1,6 @@
 {
   "name": "trufflehog-mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "MCP server for TruffleHog Enterprise - Secret Detection and Scanning",
   "main": "dist/index.js",
   "type": "module",

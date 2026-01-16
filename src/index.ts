@@ -38,24 +38,37 @@ const config = {
   webhookToken: process.env.TRUFFLEHOG_WEBHOOK_TOKEN || "",
 };
 
-// Check if TruffleHog CLI is installed
+// Cache for CLI installation check (performance optimization)
+let cliInstallationCache: { installed: boolean; version: string; checkedAt: number } | null = null;
+const CLI_CACHE_TTL = 60000; // 1 minute cache
+
+// Check if TruffleHog CLI is installed (with caching)
 function isTruffleHogInstalled(): boolean {
+  const now = Date.now();
+  if (cliInstallationCache && (now - cliInstallationCache.checkedAt) < CLI_CACHE_TTL) {
+    return cliInstallationCache.installed;
+  }
+
   try {
-    execFileSync("trufflehog", ["--version"], { stdio: "pipe" });
+    const version = execFileSync("trufflehog", ["--version"], { stdio: "pipe", encoding: "utf-8" }).trim();
+    cliInstallationCache = { installed: true, version, checkedAt: now };
     return true;
   } catch {
+    cliInstallationCache = { installed: false, version: "Not installed", checkedAt: now };
     return false;
   }
 }
 
-// Get TruffleHog version
+// Get TruffleHog version (using cache)
 function getTruffleHogVersion(): string {
-  try {
-    const result = execFileSync("trufflehog", ["--version"], { encoding: "utf-8" });
-    return result.trim();
-  } catch {
-    return "Not installed";
+  const now = Date.now();
+  if (cliInstallationCache && (now - cliInstallationCache.checkedAt) < CLI_CACHE_TTL) {
+    return cliInstallationCache.version;
   }
+
+  // Trigger cache refresh
+  isTruffleHogInstalled();
+  return cliInstallationCache?.version || "Not installed";
 }
 
 // Execute TruffleHog scan with given arguments using spawn (safer than exec)
@@ -290,6 +303,37 @@ const tools: Tool[] = [
         },
       },
       required: ["org"],
+    },
+  },
+  {
+    name: "scan_gitlab",
+    description:
+      "Scan GitLab projects or groups for secrets. Supports GitLab.com and self-hosted instances. Uses GitLab V3 detector (2024 update).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "GitLab URL (e.g., https://gitlab.com for GitLab.com or your self-hosted URL)",
+        },
+        token: {
+          type: "string",
+          description: "GitLab personal access token for authentication",
+        },
+        group: {
+          type: "string",
+          description: "GitLab group to scan (optional, scans all accessible if not specified)",
+        },
+        project: {
+          type: "string",
+          description: "Specific project to scan (optional)",
+        },
+        onlyVerified: {
+          type: "boolean",
+          description: "Only return verified secrets (default: false)",
+        },
+      },
+      required: ["url", "token"],
     },
   },
   {
@@ -587,6 +631,40 @@ brew install trufflehog
       return formatFindings(findings);
     }
 
+    case "scan_gitlab": {
+      if (!isTruffleHogInstalled()) {
+        return "Error: TruffleHog CLI is not installed. Please install it first.";
+      }
+
+      const url = args.url as string;
+      const token = args.token as string;
+      const cmdArgs = ["gitlab", "--token", token, "--json"];
+
+      // Add URL if not GitLab.com
+      if (!url.includes("gitlab.com")) {
+        cmdArgs.push("--url", url);
+      }
+
+      if (args.group) {
+        cmdArgs.push("--group", args.group as string);
+      }
+      if (args.project) {
+        cmdArgs.push("--project", args.project as string);
+      }
+      if (args.onlyVerified) {
+        cmdArgs.push("--only-verified");
+      }
+
+      const result = await executeTruffleHogScan(cmdArgs);
+
+      if (result.exitCode !== 0 && result.stderr && !result.stdout) {
+        return `Error scanning GitLab: ${result.stderr}`;
+      }
+
+      const findings = parseFindings(result.stdout);
+      return formatFindings(findings);
+    }
+
     case "scan_filesystem": {
       if (!isTruffleHogInstalled()) {
         return "Error: TruffleHog CLI is not installed. Please install it first.";
@@ -662,20 +740,20 @@ brew install trufflehog
     }
 
     case "list_detectors": {
-      // Common detector types supported by TruffleHog
+      // Common detector types supported by TruffleHog (updated for 2025)
       const detectors = [
         { name: "AWS", description: "AWS Access Keys and Secret Keys" },
         { name: "Azure", description: "Azure credentials and connection strings" },
         { name: "GCP", description: "Google Cloud Platform credentials" },
         { name: "GitHub", description: "GitHub personal access tokens and OAuth tokens" },
-        { name: "GitLab", description: "GitLab tokens and credentials" },
+        { name: "GitLab", description: "GitLab tokens and credentials (V3 detector)" },
         { name: "Slack", description: "Slack tokens and webhooks" },
         { name: "Stripe", description: "Stripe API keys" },
         { name: "Twilio", description: "Twilio API credentials" },
         { name: "SendGrid", description: "SendGrid API keys" },
         { name: "Mailchimp", description: "Mailchimp API keys" },
         { name: "HubSpot", description: "HubSpot API keys" },
-        { name: "Datadog", description: "Datadog API and application keys" },
+        { name: "Datadog", description: "Datadog API and application keys (2025 analyzer)" },
         { name: "PagerDuty", description: "PagerDuty API tokens" },
         { name: "Okta", description: "Okta API tokens" },
         { name: "Auth0", description: "Auth0 credentials" },
@@ -685,13 +763,24 @@ brew install trufflehog
         { name: "MySQL", description: "MySQL connection strings" },
         { name: "Redis", description: "Redis connection strings" },
         { name: "SSH", description: "SSH private keys" },
-        { name: "JWT", description: "JSON Web Tokens" },
+        { name: "JWT", description: "JSON Web Tokens (with verification - 2024 update)" },
         { name: "Generic", description: "Generic high-entropy strings" },
+        { name: "Plaid", description: "Plaid API keys (2025 analyzer)" },
+        { name: "Netlify", description: "Netlify personal tokens (2025 analyzer)" },
+        { name: "Fastly", description: "Fastly personal tokens (2025 analyzer)" },
+        { name: "Monday", description: "Monday.com API tokens (2025 analyzer)" },
+        { name: "Ngrok", description: "Ngrok authentication tokens (2025 analyzer)" },
+        { name: "Mux", description: "Mux API credentials (2025 analyzer)" },
+        { name: "Posthog", description: "PostHog API keys (2025 analyzer)" },
+        { name: "Dropbox", description: "Dropbox access tokens (2025 analyzer)" },
+        { name: "Databricks", description: "Databricks tokens (2025 analyzer)" },
+        { name: "Jira", description: "Jira API tokens (2025 analyzer)" },
+        { name: "Salesforce", description: "Salesforce OAuth2 tokens (2025 detector)" },
       ];
 
       let output = `# TruffleHog Detectors
 
-TruffleHog supports 800+ secret detectors. Here are some common ones:
+TruffleHog supports 900+ secret detectors (2025 update). Here are common ones:
 
 | Detector | Description |
 |----------|-------------|
@@ -706,6 +795,7 @@ TruffleHog supports 800+ secret detectors. Here are some common ones:
 - TruffleHog automatically verifies secrets against the respective service APIs
 - Run \`trufflehog --help\` for a complete list of supported detectors
 - Custom detectors can be configured via the configuration file
+- New analyzers added in 2025: Plaid, Netlify, Fastly, Monday, Datadog, Ngrok, Mux, Posthog, Dropbox, Databricks, Jira, Salesforce
 `;
 
       return output;
@@ -716,12 +806,13 @@ TruffleHog supports 800+ secret detectors. Here are some common ones:
         return "Error: TruffleHog CLI is not installed. Please install it first.";
       }
 
-      // Create a temporary file with the secret for scanning
+      // Create a temporary file with the secret for scanning (using crypto for unique naming)
       const tempDir = os.tmpdir();
-      const tempFile = path.join(tempDir, `trufflehog-verify-${Date.now()}.txt`);
+      const randomSuffix = Math.random().toString(36).substring(2, 15);
+      const tempFile = path.join(tempDir, `trufflehog-verify-${randomSuffix}.txt`);
 
       try {
-        fs.writeFileSync(tempFile, args.secret as string);
+        fs.writeFileSync(tempFile, args.secret as string, { mode: 0o600 }); // Restrict permissions
 
         const cmdArgs = [
           "filesystem",
@@ -732,9 +823,6 @@ TruffleHog supports 800+ secret detectors. Here are some common ones:
         ];
 
         const result = await executeTruffleHogScan(cmdArgs);
-
-        // Clean up temp file
-        fs.unlinkSync(tempFile);
 
         const findings = parseFindings(result.stdout);
 
@@ -764,13 +852,16 @@ ${
 }
 `;
       } catch (error) {
-        // Clean up on error
+        return `Error verifying secret: ${error}`;
+      } finally {
+        // Always clean up temp file in finally block
         try {
-          fs.unlinkSync(tempFile);
+          if (fs.existsSync(tempFile)) {
+            fs.unlinkSync(tempFile);
+          }
         } catch {
           // Ignore cleanup errors
         }
-        return `Error verifying secret: ${error}`;
       }
     }
 
@@ -954,7 +1045,7 @@ async function main() {
   const server = new Server(
     {
       name: "trufflehog-mcp",
-      version: "1.0.0",
+      version: "1.1.0",
     },
     {
       capabilities: {
@@ -962,6 +1053,16 @@ async function main() {
       },
     }
   );
+
+  // Validate TruffleHog installation on startup (non-blocking)
+  const installed = isTruffleHogInstalled();
+  if (!installed) {
+    console.error("Warning: TruffleHog CLI is not installed. Some features will be unavailable.");
+    console.error("Install with: brew install trufflehog (macOS) or download from https://github.com/trufflesecurity/trufflehog/releases");
+  } else {
+    const version = getTruffleHogVersion();
+    console.error(`TruffleHog CLI detected: ${version}`);
+  }
 
   // Handle tool listing
   server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -983,11 +1084,12 @@ async function main() {
         ],
       };
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
       return {
         content: [
           {
             type: "text",
-            text: `Error executing tool ${name}: ${error}`,
+            text: `Error executing tool ${name}: ${errorMessage}`,
           },
         ],
         isError: true,
@@ -999,7 +1101,10 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  console.error("TruffleHog MCP Server started");
+  console.error("TruffleHog MCP Server started successfully");
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error("Fatal error starting TruffleHog MCP Server:", error);
+  process.exit(1);
+});
